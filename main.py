@@ -98,15 +98,17 @@ async def _run_full_sync_job(source: str, already_reserved: bool = False) -> boo
 
     try:
         async with SessionLocal() as session:
-            await run_full_sync(session)
+            try:
+                await run_full_sync(session)
+            except Exception:
+                logger.exception("%s Amazon full sync failed", source.capitalize())
             
-        async with SessionLocal() as session:
-            await run_website_orders_sync(session)
+            try:
+                await run_website_orders_sync(session)
+            except Exception:
+                logger.exception("%s Website orders sync failed", source.capitalize())
             
         return True
-    except Exception:
-        logger.exception("%s full sync failed", source.capitalize())
-        return False
     finally:
         _sync_running = False
 
