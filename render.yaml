@@ -36,7 +36,7 @@ services:
     runtime: python
     region: singapore
     plan: free
-    schedule: "0 * * * *"  # Every hour at minute 0
+    schedule: "* * * * *"  # Every hour at minute 0
     buildCommand: pip install -r requirements.txt
     startCommand: python -c "import httpx; import os; r = httpx.post(os.getenv('SELF_BASE_URL', 'https://haltedb-backend.onrender.com') + '/sync-all'); print(r.json())"
     envVars:
