@@ -66,10 +66,20 @@ GST_INVOICE_REPORT_TYPES = (
 # Amazon Access Token
 # ============================================
 
+_cached_token: str | None = None
+_cached_token_expires_at: float = 0.0
+
 async def get_amazon_access_token() -> str:
     """
     Exchanges your permanent Refresh Token for a temporary 1-hour Access Token.
+    Caches the token in memory to avoid redundant authentication calls.
     """
+    global _cached_token, _cached_token_expires_at
+    import time
+    now_ts = time.time()
+    if _cached_token and now_ts < _cached_token_expires_at:
+        return _cached_token
+
     client_id = os.getenv("SP_API_LWA_APP_ID")
     client_secret = os.getenv("SP_API_LWA_CLIENT_SECRET")
     refresh_token = os.getenv("SP_API_REFRESH_TOKEN")
@@ -85,13 +95,15 @@ async def get_amazon_access_token() -> str:
         "client_secret": client_secret,
     }
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(auth_url, data=payload)
         if response.status_code != 200:
             logger.error(f"Amazon Auth Error: {response.text}")
             raise ValueError(f"Failed to authenticate with Amazon SP-API: {response.text}")
         data = response.json()
-        return data["access_token"]
+        _cached_token = data["access_token"]
+        _cached_token_expires_at = now_ts + data.get("expires_in", 3600) - 300
+        return _cached_token
 
 
 # ============================================
@@ -709,7 +721,7 @@ async def run_incremental_orders_sync(session: AsyncSession):
 
     lookback_start = now - timedelta(days=ORDERS_SYNC_LOOKBACK_DAYS)
     if meta.last_orders_sync:
-        start_time = min(meta.last_orders_sync - timedelta(hours=1), lookback_start)
+        start_time = max(meta.last_orders_sync - timedelta(hours=1), lookback_start)
     else:
         start_time = lookback_start
 
