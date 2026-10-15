@@ -212,7 +212,7 @@ async def sync_status(session: AsyncSession = Depends(get_db)):
 # Sync Triggers
 # ============================================
 
-@app.post("/sync-all")
+@app.api_route("/sync-all", methods=["GET", "POST"])
 async def trigger_full_sync(
     background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_db),
