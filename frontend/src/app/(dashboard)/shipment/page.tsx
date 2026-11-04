@@ -75,6 +75,12 @@ function getRateSourceBadge(rateSource: string | null) {
         background: "rgba(34,197,94,0.15)",
         color: "#22c55e",
       };
+    case "fallback":
+      return {
+        label: "EST",
+        background: "rgba(251,191,36,0.15)",
+        color: "#f59e0b",
+      };
     case "shiprocket_failed":
       return {
         label: "NO QUOTE",
@@ -102,6 +108,8 @@ function describeRateSource(rateSource: string | null) {
   switch (rateSource) {
     case "shiprocket":
       return "live";
+    case "fallback":
+      return "estimated from rate cards";
     case "shiprocket_failed":
       return "no Shiprocket quote";
     case "sp_api_finance":
@@ -588,7 +596,10 @@ export default function ShipmentPage() {
                   };
                   const validCosts = Object.values(costs).filter(Boolean) as number[];
                   const minCost = validCosts.length > 0 ? Math.min(...validCosts) : null;
-                  const hasEstimates = e.delhivery_cost != null || e.bluedart_cost != null || e.cheapest_provider != null;
+                  const hasEstimates = Boolean(
+                    e.delhivery_cost || e.bluedart_cost || e.dtdc_cost || e.xpressbees_cost || e.ekart_cost
+                    || (e.cheapest_provider && e.cheapest_provider.trim() !== "")
+                  );
                   const isExpanded = expandedRow === rowKey;
                   const isRecalcing = recalculating === rowKey;
 
@@ -691,24 +702,22 @@ export default function ShipmentPage() {
                       </td>
 
                       {isAmazonFulfilled ? (
-                        <CostCell
-                          cost={e.amazon_shipping_cost}
-                          isMin={false}
-                          etd=""
-                        />
+                        e.amazon_shipping_cost != null && e.amazon_shipping_cost > 0 ? (
+                          <CostCell
+                            cost={e.amazon_shipping_cost}
+                            isMin={false}
+                            etd=""
+                          />
+                        ) : (
+                          <td style={{ ...td, textAlign: "center", color: "var(--text-muted)", fontSize: 11 }} title="Awaiting Amazon Finance settlement">
+                            {"\u2014"}
+                          </td>
+                        )
                       ) : (
                         <td style={{ ...td, textAlign: "center", color: "var(--text-muted)", fontWeight: 800 }}>---</td>
                       )}
 
-                      {isAmazonFulfilled ? (
-                        <td colSpan={6} style={{ ...td, textAlign: "center", color: "var(--text-muted)", fontSize: 11 }}>
-                          {e.amazon_shipping_cost != null && e.amazon_shipping_cost > 0
-                            ? "Fulfilled by Amazon · SP API only"
-                            : (e.rate_source === "sp_api_pending" || !e.rate_source)
-                              ? "Awaiting Amazon Finance settlement"
-                              : "No SP API shipping data"}
-                        </td>
-                      ) : !hasEstimates ? (
+                      {!hasEstimates ? (
                         <td colSpan={6} style={{ textAlign: "center", padding: "8px" }}>
                           <button
                             className="btn btn-primary btn-sm"
@@ -727,30 +736,32 @@ export default function ShipmentPage() {
                           <CostCell cost={e.xpressbees_cost} isMin={e.xpressbees_cost === minCost} etd={e.xpressbees_etd} />
                           <CostCell cost={e.ekart_cost} isMin={e.ekart_cost === minCost} etd={e.ekart_etd} />
                           <td style={{ ...td, textAlign: "center" }}>
-                            <div style={{
-                              background: "rgba(34, 197, 94, 0.15)", color: "#22c55e",
-                              borderRadius: 6, padding: "4px 8px", fontSize: 12, fontWeight: 700,
-                            }}>
-                              {e.cheapest_provider}
-                              <div style={{ fontSize: 11, fontWeight: 600 }}>{fmt(e.cheapest_cost)}</div>
-                            </div>
+                            {e.cheapest_provider ? (
+                              <div style={{
+                                background: "rgba(34, 197, 94, 0.15)", color: "#22c55e",
+                                borderRadius: 6, padding: "4px 8px", fontSize: 12, fontWeight: 700,
+                              }}>
+                                {e.cheapest_provider}
+                                <div style={{ fontSize: 11, fontWeight: 600 }}>{fmt(e.cheapest_cost)}</div>
+                              </div>
+                            ) : (
+                              <span style={{ color: "var(--text-muted)" }}>{"\u2014"}</span>
+                            )}
                           </td>
                         </>
                       )}
 
                       {/* Actions: Recalculate */}
                       <td style={{ ...td, textAlign: "center" }}>
-                        {hasEstimates ? (
-                          <button
-                            className="btn btn-ghost btn-sm"
-                            style={{ padding: "3px 8px", fontSize: 10 }}
-                            disabled={isRecalcing}
-                            onClick={() => recalculateOrder(e.amazon_order_id, e.sku)}
-                            title="Recalculate shipment cost"
-                          >
-                            {isRecalcing ? "..." : "Recalc"}
-                          </button>
-                        ) : null}
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          style={{ padding: "3px 8px", fontSize: 10 }}
+                          disabled={isRecalcing}
+                          onClick={() => recalculateOrder(e.amazon_order_id, e.sku)}
+                          title="Recalculate shipment cost"
+                        >
+                          {isRecalcing ? "..." : "Recalc"}
+                        </button>
                       </td>
                     </tr>
                   );

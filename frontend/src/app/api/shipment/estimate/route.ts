@@ -2,29 +2,10 @@ import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { placedOrderConditions } from "@/lib/orderFilters";
 import {
-  fetchShiprocketRates, findCheapest,
+  getCarrierRates, findCheapest,
   normalizePincode, normalizeProviderName, ORIGIN_PIN,
   ShiprocketDimensions,
 } from "@/lib/shipment";
-
-const EMPTY_RATES: Record<string, { cost: number; etd: string }> = {};
-
-function getExistingCarrierCheapest(order: Record<string, unknown>) {
-  const candidates = [
-    ["Delhivery", Number(order.delhivery_cost) || 0] as [string, number],
-    ["BlueDart", Number(order.bluedart_cost) || 0] as [string, number],
-    ["DTDC", Number(order.dtdc_cost) || 0] as [string, number],
-    ["Xpressbees", Number(order.xpressbees_cost) || 0] as [string, number],
-    ["Ekart", Number(order.ekart_cost) || 0] as [string, number],
-  ].filter(([, cost]) => cost > 0);
-
-  if (candidates.length === 0) {
-    return { cheapestProvider: null, cheapestCost: null };
-  }
-
-  candidates.sort((a, b) => a[1] - b[1]);
-  return { cheapestProvider: candidates[0][0], cheapestCost: candidates[0][1] };
-}
 
 // ═══════════════════════════════════════════════════
 // POST /api/shipment/estimate — estimate rates for new orders (bulk)
@@ -32,7 +13,6 @@ function getExistingCarrierCheapest(order: Record<string, unknown>) {
 
 export async function POST() {
   try {
-    // Estimate new orders and refresh Amazon-fulfilled rows that still have no usable Amazon cost.
     const ordersResult = await pool.query(`
       SELECT DISTINCT ON (o.amazon_order_id, o.sku)
         o.amazon_order_id, o.sku, o.asin,
@@ -50,17 +30,12 @@ export async function POST() {
         AND ${placedOrderConditions("o").join(" AND ")}
         AND (
           se.id IS NULL
+          OR se.delhivery_cost IS NULL
           OR (
             (LOWER(COALESCE(o.fulfillment_channel, '')) LIKE '%amazon%' OR LOWER(COALESCE(o.fulfillment_channel, '')) LIKE '%afn%')
             AND COALESCE(se.amazon_shipping_cost, 0) <= 0
           )
-          OR (
-            NOT (
-              LOWER(COALESCE(o.fulfillment_channel, '')) LIKE '%amazon%'
-              OR LOWER(COALESCE(o.fulfillment_channel, '')) LIKE '%afn%'
-            )
-            AND se.rate_source = 'shiprocket_failed'
-          )
+          OR se.rate_source = 'shiprocket_failed'
         )
       ORDER BY o.amazon_order_id DESC, o.sku
       LIMIT 200
@@ -85,7 +60,7 @@ export async function POST() {
 
     let estimated = 0;
     let shiprocketCount = 0;
-    let shiprocketFailedCount = 0;
+    let fallbackCount = 0;
 
     for (const order of ordersResult.rows) {
       const destPin = normalizePincode(order.ship_postal_code);
@@ -98,105 +73,22 @@ export async function POST() {
       const isAmzFulfilled = (order.fulfillment_channel || "").toLowerCase().includes("amazon")
         || (order.fulfillment_channel || "").toLowerCase().includes("afn");
       const recordedAmazonCost = Number(order.recorded_amazon_shipping_cost) || 0;
-      const hasExistingRow = order.shipment_estimate_id != null;
 
-      if (isAmzFulfilled) {
-        if (recordedAmazonCost <= 0) {
-          // Amazon-fulfilled with no SP-API data yet.
-          // If row exists, leave it alone — don't clobber user-recalc'd Shiprocket data.
-          if (hasExistingRow) {
-            const { cheapestProvider, cheapestCost } = getExistingCarrierCheapest(order);
-            await pool.query(`
-              UPDATE shipment_estimates
-              SET
-                amazon_shipping_cost = 0,
-                cheapest_provider = $3,
-                cheapest_cost = $4,
-                estimated_at = NOW()
-              WHERE amazon_order_id = $1 AND sku = $2
-            `, [
-              order.amazon_order_id,
-              order.sku,
-              cheapestProvider,
-              cheapestCost,
-            ]);
-            estimated++;
-            continue;
-          }
-          // No row yet — insert a minimal placeholder so it shows up in the UI.
-          await pool.query(`
-            INSERT INTO shipment_estimates (
-              amazon_order_id, sku, origin_pincode,
-              destination_pincode, destination_city, destination_state,
-              package_weight_kg, volumetric_weight_kg, chargeable_weight_kg,
-              amazon_shipping_cost, rate_source, estimated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, 'sp_api_pending', NOW())
-            ON CONFLICT (amazon_order_id, sku) DO NOTHING
-          `, [
-            order.amazon_order_id, order.sku, ORIGIN_PIN,
-            destPin, order.ship_city, order.ship_state,
-            actualWeight, volumetricWeight, chargeableWeight,
-          ]);
-          estimated++;
-          continue;
-        }
-
-        // Amazon-fulfilled WITH SP-API data — targeted update of amazon_shipping_cost.
-        // Carrier columns and rate_source are preserved on existing rows.
-        await pool.query(`
-          INSERT INTO shipment_estimates (
-            amazon_order_id, sku, origin_pincode,
-            destination_pincode, destination_city, destination_state,
-            package_weight_kg, volumetric_weight_kg, chargeable_weight_kg,
-            amazon_shipping_cost, cheapest_provider, cheapest_cost,
-            rate_source, estimated_at
-          ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-            CASE WHEN $10::numeric > 0 THEN 'Amazon' ELSE NULL END,
-            CASE WHEN $10::numeric > 0 THEN $10::numeric ELSE NULL END,
-            'sp_api_finance', NOW()
-          )
-          ON CONFLICT (amazon_order_id, sku) DO UPDATE SET
-            amazon_shipping_cost = EXCLUDED.amazon_shipping_cost,
-            cheapest_provider = CASE
-              WHEN EXCLUDED.amazon_shipping_cost > 0
-                   AND (shipment_estimates.cheapest_cost IS NULL
-                        OR EXCLUDED.amazon_shipping_cost < shipment_estimates.cheapest_cost)
-              THEN 'Amazon'
-              ELSE shipment_estimates.cheapest_provider
-            END,
-            cheapest_cost = CASE
-              WHEN EXCLUDED.amazon_shipping_cost > 0
-                   AND (shipment_estimates.cheapest_cost IS NULL
-                        OR EXCLUDED.amazon_shipping_cost < shipment_estimates.cheapest_cost)
-              THEN EXCLUDED.amazon_shipping_cost
-              ELSE shipment_estimates.cheapest_cost
-            END,
-            estimated_at = NOW()
-        `, [
-          order.amazon_order_id, order.sku, ORIGIN_PIN,
-          destPin, order.ship_city, order.ship_state,
-          actualWeight, volumetricWeight, chargeableWeight,
-          recordedAmazonCost,
-        ]);
-        estimated++;
-        continue;
-      }
-
-      // Merchant-fulfilled: use Shiprocket live rates + full UPSERT.
       const dims: ShiprocketDimensions = {};
       if ((spec?.length_cm as number) > 0) dims.length = spec.length_cm as number;
       if ((spec?.width_cm as number) > 0) dims.breadth = spec.width_cm as number;
       if ((spec?.height_cm as number) > 0) dims.height = spec.height_cm as number;
 
-      const result = await fetchShiprocketRates(ORIGIN_PIN, destPin, chargeableWeight, dims);
-      const rates = result?.rates || EMPTY_RATES;
-      const source = result ? result.source : "shiprocket_failed";
+      const { rates, source } = await getCarrierRates(ORIGIN_PIN, destPin, chargeableWeight, dims);
       if (source === "shiprocket") shiprocketCount++;
-      else shiprocketFailedCount++;
-      const amazonCost = 0;
+      else fallbackCount++;
 
+      const amazonCost = isAmzFulfilled ? recordedAmazonCost : 0;
       const { cheapestProvider, cheapestCost } = findCheapest(rates, amazonCost);
+
+      const rateSource = source === "shiprocket"
+        ? "shiprocket"
+        : (isAmzFulfilled && amazonCost > 0 ? "sp_api_finance" : source);
 
       await pool.query(`
         INSERT INTO shipment_estimates (
@@ -220,7 +112,10 @@ export async function POST() {
           package_weight_kg = EXCLUDED.package_weight_kg,
           volumetric_weight_kg = EXCLUDED.volumetric_weight_kg,
           chargeable_weight_kg = EXCLUDED.chargeable_weight_kg,
-          amazon_shipping_cost = EXCLUDED.amazon_shipping_cost,
+          amazon_shipping_cost = CASE
+            WHEN EXCLUDED.amazon_shipping_cost > 0 THEN EXCLUDED.amazon_shipping_cost
+            ELSE shipment_estimates.amazon_shipping_cost
+          END,
           delhivery_cost = EXCLUDED.delhivery_cost,
           bluedart_cost = EXCLUDED.bluedart_cost,
           dtdc_cost = EXCLUDED.dtdc_cost,
@@ -245,17 +140,17 @@ export async function POST() {
         rates.delhivery?.etd ?? null, rates.bluedart?.etd ?? null,
         rates.dtdc?.etd ?? null, rates.xpressbees?.etd ?? null, rates.ekart?.etd ?? null,
         normalizeProviderName(cheapestProvider), cheapestCost === Infinity ? null : cheapestCost,
-        source,
+        rateSource,
       ]);
 
       estimated++;
     }
 
     return NextResponse.json({
-      message: `Estimated or refreshed ${estimated} orders (${shiprocketCount} Shiprocket live, ${shiprocketFailedCount} Shiprocket failed)`,
+      message: `Estimated or refreshed ${estimated} orders (${shiprocketCount} Shiprocket live, ${fallbackCount} estimated rate-card)`,
       estimated,
       shiprocket: shiprocketCount,
-      shiprocket_failed: shiprocketFailedCount,
+      fallback: fallbackCount,
     });
   } catch (error) {
     console.error("Shipment estimate error:", error);

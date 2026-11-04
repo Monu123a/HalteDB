@@ -1318,10 +1318,11 @@ def _find_existing_carrier_cheapest(order: dict) -> tuple[str | None, float | No
 
 async def run_shipment_sync(session: AsyncSession, missing_only: bool = False):
     where_extra = (
-        "AND se.id IS NULL"
+        "AND (se.id IS NULL OR se.delhivery_cost IS NULL)"
         if missing_only
         else """AND (
           se.id IS NULL
+          OR se.delhivery_cost IS NULL
           OR (
             (
               LOWER(COALESCE(o.fulfillment_channel, '')) LIKE '%amazon%'
@@ -1429,59 +1430,8 @@ async def run_shipment_sync(session: AsyncSession, missing_only: bool = False):
         recorded_cost = float(order.get("recorded_amazon_shipping_cost") or 0)
         has_existing_row = order.get("shipment_estimate_id") is not None
 
+        actual_amazon_cost = 0.0
         if is_amz:
-            has_sp_api_data = finance_cost > 0 or recorded_cost > 0
-
-            if not has_sp_api_data:
-                # Amazon-fulfilled without SP-API finance data.
-                if has_existing_row:
-                    cheapest_provider, cheapest_cost = _find_existing_carrier_cheapest(order)
-                    await session.execute(sa_text("""
-                      UPDATE shipment_estimates
-                      SET
-                        amazon_shipping_cost = 0,
-                        cheapest_provider = :cheapest_provider,
-                        cheapest_cost = :cheapest_cost,
-                        estimated_at = NOW()
-                      WHERE amazon_order_id = :amazon_order_id AND sku = :sku
-                    """), {
-                        "amazon_order_id": order["amazon_order_id"],
-                        "sku": order["sku"],
-                        "cheapest_provider": cheapest_provider,
-                        "cheapest_cost": cheapest_cost,
-                    })
-                    touched_order_ids.add(order["amazon_order_id"])
-                    estimated += 1
-                    continue
-                # No row yet — insert a minimal placeholder so the order shows up in UI.
-                await session.execute(sa_text("""
-                  INSERT INTO shipment_estimates (
-                    amazon_order_id, sku, origin_pincode,
-                    destination_pincode, destination_city, destination_state,
-                    package_weight_kg, volumetric_weight_kg, chargeable_weight_kg,
-                    amazon_shipping_cost, rate_source, estimated_at
-                  ) VALUES (
-                    :amazon_order_id, :sku, :origin_pincode,
-                    :destination_pincode, :destination_city, :destination_state,
-                    :package_weight_kg, :volumetric_weight_kg, :chargeable_weight_kg,
-                    0, 'sp_api_pending', NOW()
-                  )
-                  ON CONFLICT (amazon_order_id, sku) DO NOTHING
-                """), {
-                    "amazon_order_id": order["amazon_order_id"],
-                    "sku": order["sku"],
-                    "origin_pincode": normalize_pincode(ORIGIN_PINCODE) or ORIGIN_PINCODE,
-                    "destination_pincode": dest_pin,
-                    "destination_city": order.get("ship_city"),
-                    "destination_state": order.get("ship_state"),
-                    "package_weight_kg": actual_weight,
-                    "volumetric_weight_kg": volumetric_weight,
-                    "chargeable_weight_kg": chargeable_weight,
-                })
-                estimated += 1
-                continue
-
-            # Amazon-fulfilled WITH SP-API data — targeted update of amazon_shipping_cost.
             actual_amazon_cost = finance_cost or recorded_cost
 
             if finance_cost > 0 and abs(finance_cost - recorded_cost) > 0.01:
@@ -1504,60 +1454,10 @@ async def run_shipment_sync(session: AsyncSession, missing_only: bool = False):
                     "amazon_order_id": order["amazon_order_id"],
                     "sku": order["sku"],
                 })
+            if actual_amazon_cost > 0:
+                actual_amazon_count += 1
 
-            # Insert-if-new-or-update-just-amazon-cost. Carrier columns and rate_source
-            # are preserved on existing rows so user-recalc'd Shiprocket data isn't wiped.
-            await session.execute(sa_text("""
-              INSERT INTO shipment_estimates (
-                amazon_order_id, sku, origin_pincode,
-                destination_pincode, destination_city, destination_state,
-                package_weight_kg, volumetric_weight_kg, chargeable_weight_kg,
-                amazon_shipping_cost, cheapest_provider, cheapest_cost,
-                rate_source, estimated_at
-              ) VALUES (
-                :amazon_order_id, :sku, :origin_pincode,
-                :destination_pincode, :destination_city, :destination_state,
-                :package_weight_kg, :volumetric_weight_kg, :chargeable_weight_kg,
-                CAST(:amazon_shipping_cost AS DOUBLE PRECISION),
-                CASE WHEN CAST(:amazon_shipping_cost AS DOUBLE PRECISION) > 0 THEN 'Amazon' ELSE NULL END,
-                CASE WHEN CAST(:amazon_shipping_cost AS DOUBLE PRECISION) > 0 THEN CAST(:amazon_shipping_cost AS DOUBLE PRECISION) ELSE NULL END,
-                'sp_api_finance', NOW()
-              )
-              ON CONFLICT (amazon_order_id, sku) DO UPDATE SET
-                amazon_shipping_cost = EXCLUDED.amazon_shipping_cost,
-                cheapest_provider = CASE
-                  WHEN EXCLUDED.amazon_shipping_cost > 0
-                       AND (shipment_estimates.cheapest_cost IS NULL
-                            OR EXCLUDED.amazon_shipping_cost < shipment_estimates.cheapest_cost)
-                  THEN 'Amazon'
-                  ELSE shipment_estimates.cheapest_provider
-                END,
-                cheapest_cost = CASE
-                  WHEN EXCLUDED.amazon_shipping_cost > 0
-                       AND (shipment_estimates.cheapest_cost IS NULL
-                            OR EXCLUDED.amazon_shipping_cost < shipment_estimates.cheapest_cost)
-                  THEN EXCLUDED.amazon_shipping_cost
-                  ELSE shipment_estimates.cheapest_cost
-                END,
-                estimated_at = NOW()
-            """), {
-                "amazon_order_id": order["amazon_order_id"],
-                "sku": order["sku"],
-                "origin_pincode": normalize_pincode(ORIGIN_PINCODE) or ORIGIN_PINCODE,
-                "destination_pincode": dest_pin,
-                "destination_city": order.get("ship_city"),
-                "destination_state": order.get("ship_state"),
-                "package_weight_kg": actual_weight,
-                "volumetric_weight_kg": volumetric_weight,
-                "chargeable_weight_kg": chargeable_weight,
-                "amazon_shipping_cost": actual_amazon_cost,
-            })
-            actual_amazon_count += 1
-            touched_order_ids.add(order["amazon_order_id"])
-            estimated += 1
-            continue
-
-        # Merchant-fulfilled — fetch Shiprocket live rates and do full UPSERT.
+        # Fetch Shiprocket live rates (or fallback to rate cards) and do full UPSERT.
         dims = {}
         if order.get("length_cm"):
             dims["length"] = order["length_cm"]
@@ -1570,10 +1470,24 @@ async def run_shipment_sync(session: AsyncSession, missing_only: bool = False):
         )
         if source == "shiprocket":
             shiprocket_count += 1
+        elif source == "fallback":
+            pass
         else:
             shiprocket_failed_count += 1
-        amazon_cost = 0.0
+
+        amazon_cost = actual_amazon_cost if is_amz else 0.0
         cheapest_provider, cheapest_cost = find_cheapest(rates, amazon_cost)
+
+        if source == "shiprocket":
+            rate_source = "shiprocket"
+        elif source == "fallback":
+            rate_source = "fallback"
+        elif is_amz and actual_amazon_cost > 0:
+            rate_source = "sp_api_finance"
+        elif is_amz:
+            rate_source = "sp_api_pending"
+        else:
+            rate_source = source
 
         await session.execute(sa_text("""
           INSERT INTO shipment_estimates (
@@ -1600,7 +1514,10 @@ async def run_shipment_sync(session: AsyncSession, missing_only: bool = False):
             package_weight_kg = EXCLUDED.package_weight_kg,
             volumetric_weight_kg = EXCLUDED.volumetric_weight_kg,
             chargeable_weight_kg = EXCLUDED.chargeable_weight_kg,
-            amazon_shipping_cost = EXCLUDED.amazon_shipping_cost,
+            amazon_shipping_cost = CASE
+              WHEN EXCLUDED.amazon_shipping_cost > 0 THEN EXCLUDED.amazon_shipping_cost
+              ELSE shipment_estimates.amazon_shipping_cost
+            END,
             delhivery_cost = EXCLUDED.delhivery_cost,
             bluedart_cost = EXCLUDED.bluedart_cost,
             dtdc_cost = EXCLUDED.dtdc_cost,
@@ -1638,7 +1555,7 @@ async def run_shipment_sync(session: AsyncSession, missing_only: bool = False):
             "ekart_etd": (rates.get("ekart") or {}).get("etd"),
             "cheapest_provider": normalize_provider_name(cheapest_provider),
             "cheapest_cost": None if cheapest_cost == float("inf") else cheapest_cost,
-            "rate_source": source,
+            "rate_source": rate_source,
         })
 
         touched_order_ids.add(order["amazon_order_id"])

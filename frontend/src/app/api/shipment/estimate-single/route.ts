@@ -2,12 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { placedOrderConditions } from "@/lib/orderFilters";
 import {
-  fetchShiprocketRates, findCheapest,
+  getCarrierRates, findCheapest,
   normalizePincode, normalizeProviderName, ORIGIN_PIN,
   isAmazonFulfilled, ShiprocketDimensions,
 } from "@/lib/shipment";
-
-const EMPTY_RATES: Record<string, { cost: number; etd: string }> = {};
 
 export async function POST(req: NextRequest) {
   try {
@@ -48,102 +46,18 @@ export async function POST(req: NextRequest) {
     const recordedAmazonCost = Number(order.recorded_amazon_shipping_cost) || 0;
     const isAmazonOrder = isAmazonFulfilled(order.fulfillment_channel);
 
-    if (isAmazonOrder) {
-      if (recordedAmazonCost > 0) {
-        await pool.query(`
-          INSERT INTO shipment_estimates (
-            amazon_order_id, sku, origin_pincode,
-            destination_pincode, destination_city, destination_state,
-            package_weight_kg, volumetric_weight_kg, chargeable_weight_kg,
-            amazon_shipping_cost, cheapest_provider, cheapest_cost,
-            rate_source, estimated_at
-          ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-            CASE WHEN $10::numeric > 0 THEN 'Amazon' ELSE NULL END,
-            CASE WHEN $10::numeric > 0 THEN $10::numeric ELSE NULL END,
-            'sp_api_finance', NOW()
-          )
-          ON CONFLICT (amazon_order_id, sku) DO UPDATE SET
-            destination_pincode = EXCLUDED.destination_pincode,
-            destination_city = EXCLUDED.destination_city,
-            destination_state = EXCLUDED.destination_state,
-            package_weight_kg = EXCLUDED.package_weight_kg,
-            volumetric_weight_kg = EXCLUDED.volumetric_weight_kg,
-            chargeable_weight_kg = EXCLUDED.chargeable_weight_kg,
-            amazon_shipping_cost = EXCLUDED.amazon_shipping_cost,
-            cheapest_provider = CASE
-              WHEN EXCLUDED.amazon_shipping_cost > 0
-                   AND (shipment_estimates.cheapest_cost IS NULL
-                        OR EXCLUDED.amazon_shipping_cost < shipment_estimates.cheapest_cost)
-              THEN 'Amazon'
-              ELSE shipment_estimates.cheapest_provider
-            END,
-            cheapest_cost = CASE
-              WHEN EXCLUDED.amazon_shipping_cost > 0
-                   AND (shipment_estimates.cheapest_cost IS NULL
-                        OR EXCLUDED.amazon_shipping_cost < shipment_estimates.cheapest_cost)
-              THEN EXCLUDED.amazon_shipping_cost
-              ELSE shipment_estimates.cheapest_cost
-            END,
-            rate_source = 'sp_api_finance',
-            estimated_at = NOW()
-        `, [
-          amazon_order_id, sku, ORIGIN_PIN,
-          destinationPincode, order.destination_city, order.destination_state,
-          actualWeight, volumetricWeight, chargeableWeight,
-          recordedAmazonCost,
-        ]);
-
-        return NextResponse.json({
-          status: "success",
-          message: "Amazon shipping refreshed from SP API order data",
-          cheapest_provider: "Amazon",
-          rate_source: "sp_api_finance",
-        });
-      }
-
-      await pool.query(`
-        INSERT INTO shipment_estimates (
-          amazon_order_id, sku, origin_pincode,
-          destination_pincode, destination_city, destination_state,
-          package_weight_kg, volumetric_weight_kg, chargeable_weight_kg,
-          amazon_shipping_cost, rate_source, estimated_at
-        ) VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $8, $9, 0, 'sp_api_pending', NOW()
-        )
-        ON CONFLICT (amazon_order_id, sku) DO UPDATE SET
-          destination_pincode = EXCLUDED.destination_pincode,
-          destination_city = EXCLUDED.destination_city,
-          destination_state = EXCLUDED.destination_state,
-          package_weight_kg = EXCLUDED.package_weight_kg,
-          volumetric_weight_kg = EXCLUDED.volumetric_weight_kg,
-          chargeable_weight_kg = EXCLUDED.chargeable_weight_kg,
-          amazon_shipping_cost = 0,
-          rate_source = 'sp_api_pending',
-          estimated_at = NOW()
-      `, [
-        amazon_order_id, sku, ORIGIN_PIN,
-        destinationPincode, order.destination_city, order.destination_state,
-        actualWeight, volumetricWeight, chargeableWeight,
-      ]);
-
-      return NextResponse.json({
-        status: "success",
-        message: "Amazon shipping is still pending in SP API Finance",
-        rate_source: "sp_api_pending",
-      });
-    }
-
     const dims: ShiprocketDimensions = {};
     if (order.length_cm) dims.length = parseFloat(order.length_cm);
     if (order.width_cm) dims.breadth = parseFloat(order.width_cm);
     if (order.height_cm) dims.height = parseFloat(order.height_cm);
 
-    const result = await fetchShiprocketRates(ORIGIN_PIN, destinationPincode, chargeableWeight, dims);
-    const rates = result?.rates || EMPTY_RATES;
-    const source = result ? result.source : "shiprocket_failed";
-    const amazonCost = 0;
+    const { rates, source } = await getCarrierRates(ORIGIN_PIN, destinationPincode, chargeableWeight, dims);
+    const amazonCost = isAmazonOrder ? recordedAmazonCost : 0;
     const { cheapestProvider, cheapestCost } = findCheapest(rates, amazonCost);
+
+    const rateSource = source === "shiprocket"
+      ? "shiprocket"
+      : (isAmazonOrder && amazonCost > 0 ? "sp_api_finance" : source);
 
     await pool.query(`
       INSERT INTO shipment_estimates (
@@ -179,14 +93,15 @@ export async function POST(req: NextRequest) {
       rates.dtdc?.cost ?? null, rates.xpressbees?.cost ?? null, rates.ekart?.cost ?? null,
       rates.delhivery?.etd ?? null, rates.bluedart?.etd ?? null,
       rates.dtdc?.etd ?? null, rates.xpressbees?.etd ?? null, rates.ekart?.etd ?? null,
-      normalizeProviderName(cheapestProvider), cheapestCost === Infinity ? null : cheapestCost, source,
+      normalizeProviderName(cheapestProvider), cheapestCost === Infinity ? null : cheapestCost,
+      rateSource,
     ]);
 
     return NextResponse.json({
       status: "success",
-      message: `Rate estimated (${source})`,
+      message: `Rate estimated (${rateSource})`,
       cheapest_provider: normalizeProviderName(cheapestProvider),
-      rate_source: source,
+      rate_source: rateSource,
     });
   } catch (error) {
     console.error("Single estimate error:", error);

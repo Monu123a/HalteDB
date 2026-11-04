@@ -446,13 +446,14 @@ async def get_shipping_rates_with_source(
     safe_dest_pin = normalize_pincode(dest_pin)
     safe_weight = max(float(weight_kg or 0.5), 0.1)
 
-    # Shiprocket live only — rate-card fallback intentionally disabled so the UI
-    # shows real quotes only. Callers must handle empty rates gracefully.
+    # Fetch Shiprocket live rates first; fall back to standard carrier rate cards
+    # if live API is disconnected or fails.
     live_rates = await _shiprocket_rates(safe_origin_pin, safe_dest_pin, safe_weight, dims)
     if live_rates:
         return live_rates, "shiprocket"
 
-    return {}, "shiprocket_failed"
+    fallback_rates = estimate_all_carriers(safe_origin_pin, safe_dest_pin, safe_weight)
+    return fallback_rates, "fallback"
 
 
 async def get_bulk_rates(origin_pin: str, orders: list[dict], default_weight: float = 0.5) -> list[dict]:
