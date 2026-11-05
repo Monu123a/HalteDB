@@ -45,8 +45,24 @@ interface Filters {
    Component
    ────────────────────────────────────────────────────────── */
 export default function SalesPage() {
-  const [filters, setFilters] = useState<Filters>({
-    sku: "", brand: "", year: "", month: "", startDate: "", endDate: "", city: "", state: "", tier: "",
+  const [filters, setFilters] = useState<Filters>(() => {
+    if (typeof window !== "undefined") {
+      const p = new URLSearchParams(window.location.search);
+      return {
+        sku: p.get("sku") || "",
+        brand: p.get("brand") || "",
+        year: p.get("year") || "",
+        month: p.get("month") || "",
+        startDate: p.get("startDate") || "",
+        endDate: p.get("endDate") || "",
+        city: p.get("city") || "",
+        state: p.get("state") || "",
+        tier: p.get("tier") || "",
+      };
+    }
+    return {
+      sku: "", brand: "", year: "", month: "", startDate: "", endDate: "", city: "", state: "", tier: "",
+    };
   });
   const [summary, setSummary] = useState<any>(null);
   const [geo, setGeo] = useState<any>(null);
@@ -90,6 +106,15 @@ export default function SalesPage() {
     if (filters.tier) p.set("tier", filters.tier);
     return p;
   }, [filters]);
+
+  // Synchronize filters to browser URL query string so refreshes/navigation never lose state
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const p = buildParams();
+    const query = p.toString();
+    const newUrl = query ? `${window.location.pathname}?${query}` : window.location.pathname;
+    window.history.replaceState(null, "", newUrl);
+  }, [filters, buildParams]);
 
   const fetchAll = useCallback(async () => {
     setLoading(true);
@@ -169,7 +194,7 @@ export default function SalesPage() {
 
   /* ── Filter helpers ── */
   const setFilter = (key: keyof Filters, val: string) => {
-    setFilters(f => ({ ...f, [key]: f[key] === val ? "" : val }));
+    setFilters((f: Filters) => ({ ...f, [key]: f[key] === val ? "" : val }));
     setPage(0);
   };
   const resetFilters = () => {
@@ -177,11 +202,62 @@ export default function SalesPage() {
     setPage(0);
   };
 
+  const handleDateChange = (key: "startDate" | "endDate", rawVal: string) => {
+    let val = rawVal.trim();
+    if (val.startsWith("0025-")) val = "2025-" + val.slice(5);
+    else if (val.startsWith("0026-")) val = "2026-" + val.slice(5);
+    else if (val.startsWith("0024-")) val = "2024-" + val.slice(5);
+    else if (val.startsWith("0023-")) val = "2023-" + val.slice(5);
+    else if (val.startsWith("0022-")) val = "2022-" + val.slice(5);
+    else if (val.startsWith("0021-")) val = "2021-" + val.slice(5);
+
+    const twoDigit = val.match(/^(\d{2})-(\d{2})-(\d{2})$/);
+    if (twoDigit) {
+      val = `20${twoDigit[1]}-${twoDigit[2]}-${twoDigit[3]}`;
+    }
+
+    setFilters((f: Filters) => ({ ...f, year: "", month: "", [key]: val }));
+    setPage(0);
+  };
+
+  const applyPreset = (preset: { year: string; month: string; startDate: string; endDate: string }) => {
+    setFilters((f: Filters) => ({
+      ...f,
+      year: preset.year,
+      month: preset.month,
+      startDate: preset.startDate,
+      endDate: preset.endDate,
+    }));
+    setPage(0);
+  };
+
+  const isAllTime = !filters.year && !filters.month && !filters.startDate && !filters.endDate;
+
+  const isPresetActive = (label: string) => {
+    if (label === "All Time") return isAllTime;
+    if (label === "2026 (YTD)") return filters.year === "2026" && !filters.startDate && !filters.endDate;
+    if (label === "2025") return filters.year === "2025" && !filters.startDate && !filters.endDate;
+    if (label === "2024") return filters.year === "2024" && !filters.startDate && !filters.endDate;
+    if (label === "Jan – Oct 2025") return filters.startDate === "2025-01-01" && filters.endDate === "2025-10-31";
+    return false;
+  };
+
+  const activePeriodLabel = useMemo(() => {
+    if (filters.startDate && filters.endDate) {
+      return `${filters.startDate} → ${filters.endDate}`;
+    }
+    if (filters.startDate) return `From ${filters.startDate}`;
+    if (filters.endDate) return `Up to ${filters.endDate}`;
+    if (filters.month) return `Month ${filters.month}`;
+    if (filters.year) return `Year ${filters.year}`;
+    return "All Time (2021 – 2026)";
+  }, [filters.startDate, filters.endDate, filters.month, filters.year]);
+
   const selectedCities = useMemo(() => filters.city ? filters.city.split(",").filter(Boolean) : [], [filters.city]);
   const selectedSkus = useMemo(() => filters.sku ? filters.sku.split(",").filter(Boolean) : [], [filters.sku]);
 
   const toggleSku = (sku: string) => {
-    setFilters(f => {
+    setFilters((f: Filters) => {
       const current = f.sku ? f.sku.split(",").filter(Boolean) : [];
       const idx = current.findIndex(s => s.toLowerCase() === sku.toLowerCase());
       const next = idx >= 0 ? current.filter((_, i) => i !== idx) : [...current, sku];
@@ -191,7 +267,7 @@ export default function SalesPage() {
   };
 
   const removeSku = (sku: string) => {
-    setFilters(f => {
+    setFilters((f: Filters) => {
       const current = f.sku ? f.sku.split(",").filter(Boolean) : [];
       return { ...f, sku: current.filter(s => s.toLowerCase() !== sku.toLowerCase()).join(",") };
     });
@@ -199,7 +275,7 @@ export default function SalesPage() {
   };
 
   const toggleCity = (city: string) => {
-    setFilters(f => {
+    setFilters((f: Filters) => {
       const current = f.city ? f.city.split(",").filter(Boolean) : [];
       const idx = current.findIndex(c => c.toLowerCase() === city.toLowerCase());
       const next = idx >= 0 ? current.filter((_, i) => i !== idx) : [...current, city];
@@ -209,7 +285,7 @@ export default function SalesPage() {
   };
 
   const removeCity = (city: string) => {
-    setFilters(f => {
+    setFilters((f: Filters) => {
       const current = f.city ? f.city.split(",").filter(Boolean) : [];
       return { ...f, city: current.filter(c => c.toLowerCase() !== city.toLowerCase()).join(",") };
     });
@@ -239,6 +315,48 @@ export default function SalesPage() {
 
       {/* ═══════════════════ FILTER BAR ═══════════════════ */}
       <div className="card" style={{ marginBottom: 16, padding: "12px 16px", position: "relative", zIndex: 50 }}>
+        {/* Quick Date Range Presets */}
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 12, paddingBottom: 10, borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
+          <span style={{ fontSize: 11, color: "var(--text-muted)", fontWeight: 700, marginRight: 4, textTransform: "uppercase", letterSpacing: 0.5 }}>Quick Period:</span>
+          {[
+            { label: "All Time", getFilters: () => ({ year: "", month: "", startDate: "", endDate: "" }) },
+            { label: "2026 (YTD)", getFilters: () => ({ year: "2026", month: "", startDate: "", endDate: "" }) },
+            { label: "2025", getFilters: () => ({ year: "2025", month: "", startDate: "", endDate: "" }) },
+            { label: "Jan – Oct 2025", getFilters: () => ({ year: "", month: "", startDate: "2025-01-01", endDate: "2025-10-31" }) },
+            { label: "2024", getFilters: () => ({ year: "2024", month: "", startDate: "", endDate: "" }) },
+            { label: "Last 12 Months", getFilters: () => {
+              const now = new Date();
+              const start = new Date();
+              start.setFullYear(now.getFullYear() - 1);
+              return { year: "", month: "", startDate: start.toISOString().slice(0, 10), endDate: now.toISOString().slice(0, 10) };
+            }},
+            { label: "Last 30 Days", getFilters: () => {
+              const now = new Date();
+              const start = new Date();
+              start.setDate(now.getDate() - 30);
+              return { year: "", month: "", startDate: start.toISOString().slice(0, 10), endDate: now.toISOString().slice(0, 10) };
+            }},
+          ].map(preset => {
+            const isActive = isPresetActive(preset.label);
+            return (
+              <button
+                key={preset.label}
+                type="button"
+                onClick={() => applyPreset(preset.getFilters())}
+                style={{
+                  padding: "4px 10px", fontSize: 11, fontWeight: 600, borderRadius: 6,
+                  border: isActive ? "1px solid #6366f1" : "1px solid var(--border)",
+                  background: isActive ? "rgba(99,102,241,0.25)" : "transparent",
+                  color: isActive ? "#a5b4fc" : "var(--text-muted)",
+                  cursor: "pointer", transition: "all 0.15s ease",
+                }}
+              >
+                {preset.label}
+              </button>
+            );
+          })}
+        </div>
+
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
           <div style={{ position: "relative" }} ref={skuDropdownRef}>
             <div style={{ display: "flex", alignItems: "center", gap: 4, width: 180 }}>
@@ -308,7 +426,7 @@ export default function SalesPage() {
             <option value="">All Brands</option>
             {(summary?.filters?.brands || []).map((b: string) => <option key={b} value={b}>{b}</option>)}
           </select>
-          <select className="filter-select" value={filters.year} onChange={e => { setFilters(f => ({ ...f, year: e.target.value })); setPage(0); }}>
+          <select className="filter-select" value={filters.year} onChange={e => { setFilters(f => ({ ...f, year: e.target.value, startDate: "", endDate: "", month: "" })); setPage(0); }}>
             <option value="">All Years</option>
             {(summary?.filters?.years || []).map((y: number) => <option key={y} value={String(y)}>{y}</option>)}
           </select>
@@ -386,16 +504,31 @@ export default function SalesPage() {
               </div>
             )}
           </div>
-          <input className="filter-input" type="month" value={filters.month} onChange={e => { setFilters(f => ({ ...f, month: e.target.value })); setPage(0); }} style={{ width: 140 }} />
+          <input
+            className="filter-input"
+            type="month"
+            value={filters.month}
+            onChange={e => { setFilters(f => ({ ...f, month: e.target.value, year: "", startDate: "", endDate: "" })); setPage(0); }}
+            style={{ width: 140 }}
+            title="Filter by specific month"
+          />
           <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
             <span style={{ fontSize: 11, color: "var(--text-muted)" }}>From</span>
-            <input className="filter-input" type="date" value={filters.startDate}
-              onChange={e => { setFilters(f => ({ ...f, startDate: e.target.value })); setPage(0); }}
-              style={{ width: 130, fontSize: 11 }} />
+            <input
+              className="filter-input"
+              type="date"
+              value={filters.startDate}
+              onChange={e => handleDateChange("startDate", e.target.value)}
+              style={{ width: 130, fontSize: 11 }}
+            />
             <span style={{ fontSize: 11, color: "var(--text-muted)" }}>To</span>
-            <input className="filter-input" type="date" value={filters.endDate}
-              onChange={e => { setFilters(f => ({ ...f, endDate: e.target.value })); setPage(0); }}
-              style={{ width: 130, fontSize: 11 }} />
+            <input
+              className="filter-input"
+              type="date"
+              value={filters.endDate}
+              onChange={e => handleDateChange("endDate", e.target.value)}
+              style={{ width: 130, fontSize: 11 }}
+            />
           </div>
           <button className="btn btn-ghost btn-sm" onClick={resetFilters} style={{ fontSize: 12 }}>
             ✕ Reset {activeFilterCount > 0 && `(${activeFilterCount})`}
@@ -416,6 +549,42 @@ export default function SalesPage() {
         )}
       </div>
 
+      {/* ═══════════════════ PERIOD BANNER ═══════════════════ */}
+      <div style={{
+        display: "flex", justifyContent: "space-between", alignItems: "center",
+        background: "var(--bg-secondary)", border: "1px solid var(--border)",
+        borderRadius: 8, padding: "8px 16px", marginBottom: 16, flexWrap: "wrap", gap: 8,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)" }}>
+            📅 Active Period: <span style={{ color: "#6366f1" }}>{activePeriodLabel}</span>
+          </span>
+          {isAllTime ? (
+            <span style={{ fontSize: 11, color: "var(--text-muted)", background: "rgba(255,255,255,0.06)", padding: "2px 8px", borderRadius: 4 }}>
+              Lifetime cumulative sales (2021 – 2026)
+            </span>
+          ) : (
+            <span style={{ fontSize: 11, color: "#10b981", background: "rgba(16,185,129,0.12)", padding: "2px 8px", borderRadius: 4 }}>
+              Filtered view · {totalOrders.toLocaleString()} orders
+            </span>
+          )}
+        </div>
+        {isAllTime ? (
+          <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+            2025: <strong style={{ color: "var(--text-primary)" }}>₹3.76Cr</strong> · 2026: <strong style={{ color: "var(--text-primary)" }}>₹3.17Cr</strong> · 2024: <strong style={{ color: "var(--text-primary)" }}>₹2.46Cr</strong>
+          </div>
+        ) : (
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={() => applyPreset({ year: "", month: "", startDate: "", endDate: "" })}
+            style={{ fontSize: 11, padding: "2px 8px" }}
+          >
+            Switch to All Time
+          </button>
+        )}
+      </div>
+
       {/* ═══════════════════ TABS ═══════════════════ */}
       <div className="tabs-bar" style={{ marginBottom: 16 }}>
         {tabs.map(t => (
@@ -427,15 +596,46 @@ export default function SalesPage() {
       {/* ═══════════════════ KPI CARDS ═══════════════════ */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 12, marginBottom: 16 }}>
         {[
-          { label: "Total Sales", value: fmtCur(totalRevenue), color: "#6366f1", icon: "💰" },
-          { label: "Net Profit", value: fmtCur(totalProfit), color: totalProfit >= 0 ? "#10b981" : "#ef4444", icon: "📈" },
-          { label: "Total Units", value: fmtNum(totalUnits), color: "#06b6d4", icon: "📦" },
-          { label: "Total Orders", value: fmtNum(totalOrders), color: "#f59e0b", icon: "🛒" },
-          { label: "ASP", value: fmtCur(asp), color: "#8b5cf6", icon: "🏷️" },
+          {
+            label: "Total Sales",
+            value: fmtCur(totalRevenue),
+            color: "#6366f1",
+            icon: "💰",
+            subtitle: isAllTime ? "All-time (2025: ₹3.76Cr · 2026: ₹3.17Cr)" : `Period total (${totalOrders.toLocaleString()} orders)`,
+          },
+          {
+            label: "Net Profit",
+            value: fmtCur(totalProfit),
+            color: totalProfit >= 0 ? "#10b981" : "#ef4444",
+            icon: "📈",
+            subtitle: `${((totalProfit / (totalRevenue || 1)) * 100).toFixed(1)}% margin`,
+          },
+          {
+            label: "Total Units",
+            value: fmtNum(totalUnits),
+            color: "#06b6d4",
+            icon: "📦",
+            subtitle: `${(totalUnits / (totalOrders || 1)).toFixed(1)} units/order`,
+          },
+          {
+            label: "Total Orders",
+            value: fmtNum(totalOrders),
+            color: "#f59e0b",
+            icon: "🛒",
+            subtitle: activePeriodLabel,
+          },
+          {
+            label: "ASP",
+            value: fmtCur(asp),
+            color: "#8b5cf6",
+            icon: "🏷️",
+            subtitle: "Average selling price",
+          },
         ].map(kpi => (
           <div key={kpi.label} className="card" style={{ padding: "16px 20px", borderLeft: `4px solid ${kpi.color}`, position: "relative" }}>
             <div style={{ fontSize: 11, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>{kpi.label}</div>
             <div style={{ fontSize: 22, fontWeight: 800, color: kpi.color }}>{kpi.value}</div>
+            <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 4, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{kpi.subtitle}</div>
             <div style={{ position: "absolute", top: 12, right: 16, fontSize: 22, opacity: 0.3 }}>{kpi.icon}</div>
           </div>
         ))}

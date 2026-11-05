@@ -18,6 +18,17 @@ const UNITS_EXPR = `CASE WHEN ${RETURN_LIKE} THEN 0 ELSE orders.quantity END`;
 const PROFIT_EXPR = `CASE WHEN ${RETURN_LIKE} THEN -2 * COALESCE(orders.shipping_price, 0) ELSE COALESCE(orders.profit, 0) END`;
 const ACTIVE_COUNT_EXPR = `COUNT(*) FILTER (WHERE NOT (${RETURN_LIKE}))`;
 
+function normalizeDateStr(dateStr: string | null | undefined): string | null {
+  if (!dateStr) return null;
+  let s = dateStr.trim();
+  if (!s) return null;
+  // Handle 0025-MM-DD -> 2025-MM-DD (when 2 digits typed in HTML5 date input)
+  s = s.replace(/^00(\d{2})-/, "20$1-");
+  // Handle 25-MM-DD -> 2025-MM-DD
+  s = s.replace(/^(\d{2})-(\d{2})-(\d{2})$/, "20$1-$2-$3");
+  return s;
+}
+
 export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
@@ -32,7 +43,7 @@ export async function GET(req: NextRequest) {
     const endDate = searchParams.get("endDate");
 
     /* ── Build WHERE clause ── */
-    let where = "WHERE orders.ship_city IS NOT NULL AND orders.ship_city != '' AND orders.item_price > 0 AND (orders.amazon_order_id IS NULL OR orders.amazon_order_id NOT LIKE 'ORD-%')";
+    let where = "WHERE orders.ship_city IS NOT NULL AND orders.ship_city != '' AND orders.purchase_date <= NOW() AND orders.item_price > 0 AND (orders.amazon_order_id IS NULL OR orders.amazon_order_id NOT LIKE 'ORD-%')";
     const params: (string | number)[] = [];
     let idx = 1;
 
@@ -73,20 +84,22 @@ export async function GET(req: NextRequest) {
       params.push(brand);
     }
     if (year) {
-      where += ` AND EXTRACT(YEAR FROM orders.purchase_date) = $${idx++}`;
+      where += ` AND EXTRACT(YEAR FROM orders.purchase_date AT TIME ZONE 'Asia/Kolkata') = $${idx++}`;
       params.push(parseInt(year));
     }
     if (month) {
-      where += ` AND TO_CHAR(orders.purchase_date, 'YYYY-MM') = $${idx++}`;
+      where += ` AND TO_CHAR(orders.purchase_date AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM') = $${idx++}`;
       params.push(month);
     }
-    if (startDate) {
+    const safeStartDate = normalizeDateStr(startDate);
+    const safeEndDate = normalizeDateStr(endDate);
+    if (safeStartDate) {
       where += ` AND (orders.purchase_date AT TIME ZONE 'Asia/Kolkata')::date >= $${idx++}::date`;
-      params.push(startDate);
+      params.push(safeStartDate);
     }
-    if (endDate) {
+    if (safeEndDate) {
       where += ` AND (orders.purchase_date AT TIME ZONE 'Asia/Kolkata')::date <= $${idx++}::date`;
-      params.push(endDate);
+      params.push(safeEndDate);
     }
 
     /* ── Tier filter: resolve tier → city list, add SQL IN-clause ── */

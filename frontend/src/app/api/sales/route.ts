@@ -14,6 +14,17 @@ const PROFIT_EXPR = `CASE WHEN ${RETURN_LIKE} THEN -2 * COALESCE(o.shipping_pric
 const ROW_COGS_EXPR = `CASE WHEN ${RETURN_LIKE} THEN NULL ELSE o.cogs_price END`;
 const ACTIVE_COUNT_EXPR = `COUNT(*) FILTER (WHERE NOT (${RETURN_LIKE}))`;
 
+function normalizeDateStr(dateStr: string | null | undefined): string | null {
+  if (!dateStr) return null;
+  let s = dateStr.trim();
+  if (!s) return null;
+  // Handle 0025-MM-DD -> 2025-MM-DD (when 2 digits typed in HTML5 date input)
+  s = s.replace(/^00(\d{2})-/, "20$1-");
+  // Handle 25-MM-DD -> 2025-MM-DD
+  s = s.replace(/^(\d{2})-(\d{2})-(\d{2})$/, "20$1-$2-$3");
+  return s;
+}
+
 export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
@@ -30,6 +41,8 @@ export async function GET(req: NextRequest) {
     const brand = searchParams.get("brand");
 
     const conditions: string[] = [
+      "o.purchase_date IS NOT NULL",
+      "o.purchase_date <= NOW()",
       "o.item_price > 0",
       "(o.amazon_order_id IS NULL OR o.amazon_order_id NOT LIKE 'ORD-%')",
     ];
@@ -47,20 +60,22 @@ export async function GET(req: NextRequest) {
         params.push(...skus);
       }
     }
-    if (startDate) {
+    const safeStartDate = normalizeDateStr(startDate);
+    const safeEndDate = normalizeDateStr(endDate);
+    if (safeStartDate) {
       conditions.push(`(o.purchase_date AT TIME ZONE 'Asia/Kolkata')::date >= $${paramIdx++}::date`);
-      params.push(startDate);
+      params.push(safeStartDate);
     }
-    if (endDate) {
+    if (safeEndDate) {
       conditions.push(`(o.purchase_date AT TIME ZONE 'Asia/Kolkata')::date <= $${paramIdx++}::date`);
-      params.push(endDate);
+      params.push(safeEndDate);
     }
     if (month) {
-      conditions.push(`TO_CHAR(o.purchase_date, 'YYYY-MM') = $${paramIdx++}`);
+      conditions.push(`TO_CHAR(o.purchase_date AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM') = $${paramIdx++}`);
       params.push(month);
     }
     if (year) {
-      conditions.push(`EXTRACT(YEAR FROM o.purchase_date) = $${paramIdx++}`);
+      conditions.push(`EXTRACT(YEAR FROM o.purchase_date AT TIME ZONE 'Asia/Kolkata') = $${paramIdx++}`);
       params.push(parseInt(year));
     }
     if (city) {
