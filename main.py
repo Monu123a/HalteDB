@@ -97,17 +97,18 @@ async def _run_full_sync_job(source: str, already_reserved: bool = False) -> boo
         _sync_running = True
 
     try:
+        async with SessionLocal() as web_session:
+            try:
+                await run_website_orders_sync(web_session)
+            except Exception:
+                logger.exception("%s Website orders sync failed", source.capitalize())
+
         async with SessionLocal() as session:
             try:
                 await run_full_sync(session)
             except Exception:
                 logger.exception("%s Amazon full sync failed", source.capitalize())
-            
-            try:
-                await run_website_orders_sync(session)
-            except Exception:
-                logger.exception("%s Website orders sync failed", source.capitalize())
-            
+
         return True
     finally:
         _sync_running = False
@@ -203,6 +204,7 @@ async def sync_status(session: AsyncSession = Depends(get_db)):
     return {
         "last_orders_sync": meta.last_orders_sync.isoformat() if meta.last_orders_sync else None,
         "last_inventory_sync": meta.last_inventory_sync.isoformat() if meta.last_inventory_sync else None,
+        "last_website_orders_sync": meta.last_website_orders_sync.isoformat() if meta.last_website_orders_sync else None,
         "last_inbound_shipments_sync": meta.last_inbound_shipments_sync.isoformat() if meta.last_inbound_shipments_sync else None,
         "last_inbound_shipments_error": meta.last_inbound_shipments_error,
     }

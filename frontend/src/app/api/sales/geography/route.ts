@@ -7,27 +7,23 @@ import {
   stateNormalizeSqlExpr,
 } from "@/lib/stateNormalize";
 import { normalizedSkuExpr, estimatedCogsLateralJoin } from "@/lib/skuNormalize";
+import {
+  activeCountExpr,
+  baseSalesConditions,
+  channelFilterCondition,
+  normalizeDateStr,
+  profitExpr,
+  revenueExpr,
+  unitsExpr,
+} from "@/lib/salesQuery";
 
 const NORM_STATE = stateNormalizeSqlExpr("orders.ship_state");
 const NORM_SKU = normalizedSkuExpr("orders.sku");
 
-// Matches Cancelled, CANCELLED, Returned, RETURNED, RTO, "Shipped - Returned to Seller", etc.
-const RETURN_LIKE = "LOWER(COALESCE(orders.order_status, '')) ~ '(cancel|return|rto)'";
-const REVENUE_EXPR = `CASE WHEN ${RETURN_LIKE} THEN 0 ELSE orders.item_price END`;
-const UNITS_EXPR = `CASE WHEN ${RETURN_LIKE} THEN 0 ELSE orders.quantity END`;
-const PROFIT_EXPR = `CASE WHEN ${RETURN_LIKE} THEN -2 * COALESCE(orders.shipping_price, 0) ELSE COALESCE(orders.profit, 0) END`;
-const ACTIVE_COUNT_EXPR = `COUNT(*) FILTER (WHERE NOT (${RETURN_LIKE}))`;
-
-function normalizeDateStr(dateStr: string | null | undefined): string | null {
-  if (!dateStr) return null;
-  let s = dateStr.trim();
-  if (!s) return null;
-  // Handle 0025-MM-DD -> 2025-MM-DD (when 2 digits typed in HTML5 date input)
-  s = s.replace(/^00(\d{2})-/, "20$1-");
-  // Handle 25-MM-DD -> 2025-MM-DD
-  s = s.replace(/^(\d{2})-(\d{2})-(\d{2})$/, "20$1-$2-$3");
-  return s;
-}
+const REVENUE_EXPR = revenueExpr("orders");
+const UNITS_EXPR = unitsExpr("orders");
+const PROFIT_EXPR = profitExpr("orders");
+const ACTIVE_COUNT_EXPR = activeCountExpr("orders");
 
 export async function GET(req: NextRequest) {
   try {
@@ -41,9 +37,17 @@ export async function GET(req: NextRequest) {
     const month = searchParams.get("month"); // YYYY-MM
     const startDate = searchParams.get("startDate");
     const endDate = searchParams.get("endDate");
+    const channel = searchParams.get("channel");
 
     /* ── Build WHERE clause ── */
-    let where = "WHERE orders.ship_city IS NOT NULL AND orders.ship_city != '' AND orders.purchase_date <= NOW() AND orders.item_price > 0 AND (orders.amazon_order_id IS NULL OR orders.amazon_order_id NOT LIKE 'ORD-%')";
+    const baseConds = [
+      "orders.ship_city IS NOT NULL",
+      "orders.ship_city != ''",
+      ...baseSalesConditions("orders"),
+    ];
+    const channelCond = channelFilterCondition("orders", channel);
+    if (channelCond) baseConds.push(channelCond);
+    let where = `WHERE ${baseConds.join(" AND ")}`;
     const params: (string | number)[] = [];
     let idx = 1;
 

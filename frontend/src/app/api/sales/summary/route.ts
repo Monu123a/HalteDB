@@ -3,29 +3,23 @@ import pool from "@/lib/db";
 import { getCityTier } from "@/lib/cityTiers";
 import { normalizedSkuExpr, estimatedCogsLateralJoin } from "@/lib/skuNormalize";
 import { stateMatchKeys, stateNormalizeSqlExpr } from "@/lib/stateNormalize";
+import {
+  activeCountExpr,
+  baseSalesConditions,
+  channelFilterCondition,
+  normalizeDateStr,
+  profitExpr,
+  revenueExpr,
+  unitsExpr,
+} from "@/lib/salesQuery";
 
 const NORM_SKU = normalizedSkuExpr("orders.sku");
 const NORM_STATE = stateNormalizeSqlExpr("orders.ship_state");
 
-// Matches Cancelled, CANCELLED, Returned, RETURNED, RTO, "Shipped - Returned to Seller", etc.
-const RETURN_LIKE = "LOWER(COALESCE(orders.order_status, '')) ~ '(cancel|return|rto)'";
-const REVENUE_EXPR = `CASE WHEN ${RETURN_LIKE} THEN 0 ELSE orders.item_price END`;
-const UNITS_EXPR = `CASE WHEN ${RETURN_LIKE} THEN 0 ELSE orders.quantity END`;
-// For return-like rows the recalc stored in orders.profit may be stale (it only caught exact
-// 'Cancelled'/'Returned'). Recompute -2 * shipping inline to match the Profitability rule.
-const PROFIT_EXPR = `CASE WHEN ${RETURN_LIKE} THEN -2 * COALESCE(orders.shipping_price, 0) ELSE COALESCE(orders.profit, 0) END`;
-const ACTIVE_COUNT_EXPR = `COUNT(*) FILTER (WHERE NOT (${RETURN_LIKE}))`;
-
-function normalizeDateStr(dateStr: string | null | undefined): string | null {
-  if (!dateStr) return null;
-  let s = dateStr.trim();
-  if (!s) return null;
-  // Handle 0025-MM-DD -> 2025-MM-DD (when 2 digits typed in HTML5 date input)
-  s = s.replace(/^00(\d{2})-/, "20$1-");
-  // Handle 25-MM-DD -> 2025-MM-DD
-  s = s.replace(/^(\d{2})-(\d{2})-(\d{2})$/, "20$1-$2-$3");
-  return s;
-}
+const REVENUE_EXPR = revenueExpr("orders");
+const UNITS_EXPR = unitsExpr("orders");
+const PROFIT_EXPR = profitExpr("orders");
+const ACTIVE_COUNT_EXPR = activeCountExpr("orders");
 
 export async function GET(req: NextRequest) {
   try {
@@ -39,14 +33,12 @@ export async function GET(req: NextRequest) {
     const tier = searchParams.get("tier");
     const startDate = searchParams.get("startDate");
     const endDate = searchParams.get("endDate");
+    const channel = searchParams.get("channel");
 
     /* ── Build dynamic WHERE ── */
-    const conditions: string[] = [
-      "orders.purchase_date IS NOT NULL",
-      "orders.purchase_date <= NOW()",
-      "orders.item_price > 0",
-      "(orders.amazon_order_id IS NULL OR orders.amazon_order_id NOT LIKE 'ORD-%')",
-    ];
+    const conditions: string[] = baseSalesConditions("orders");
+    const channelCond = channelFilterCondition("orders", channel);
+    if (channelCond) conditions.push(channelCond);
     const params: (string | number)[] = [];
     let idx = 1;
 

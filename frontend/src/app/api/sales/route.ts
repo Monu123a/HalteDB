@@ -3,27 +3,25 @@ import pool from "@/lib/db";
 import { getCityTier } from "@/lib/cityTiers";
 import { normalizedSkuExpr, estimatedCogsLateralJoin } from "@/lib/skuNormalize";
 import { stateMatchKeys, stateNormalizeSqlExpr } from "@/lib/stateNormalize";
+import {
+  activeCountExpr,
+  baseSalesConditions,
+  channelDisplayExpr,
+  channelFilterCondition,
+  normalizeDateStr,
+  profitExpr,
+  revenueExpr,
+  rowCogsExpr,
+  unitsExpr,
+} from "@/lib/salesQuery";
 
 const NORM_STATE = stateNormalizeSqlExpr("o.ship_state");
 
-// Matches Cancelled, CANCELLED, Returned, RETURNED, RTO, "Shipped - Returned to Seller", etc.
-const RETURN_LIKE = "LOWER(COALESCE(o.order_status, '')) ~ '(cancel|return|rto)'";
-const REVENUE_EXPR = `CASE WHEN ${RETURN_LIKE} THEN 0 ELSE o.item_price END`;
-const UNITS_EXPR = `CASE WHEN ${RETURN_LIKE} THEN 0 ELSE o.quantity END`;
-const PROFIT_EXPR = `CASE WHEN ${RETURN_LIKE} THEN -2 * COALESCE(o.shipping_price, 0) ELSE COALESCE(o.profit, 0) END`;
-const ROW_COGS_EXPR = `CASE WHEN ${RETURN_LIKE} THEN NULL ELSE o.cogs_price END`;
-const ACTIVE_COUNT_EXPR = `COUNT(*) FILTER (WHERE NOT (${RETURN_LIKE}))`;
-
-function normalizeDateStr(dateStr: string | null | undefined): string | null {
-  if (!dateStr) return null;
-  let s = dateStr.trim();
-  if (!s) return null;
-  // Handle 0025-MM-DD -> 2025-MM-DD (when 2 digits typed in HTML5 date input)
-  s = s.replace(/^00(\d{2})-/, "20$1-");
-  // Handle 25-MM-DD -> 2025-MM-DD
-  s = s.replace(/^(\d{2})-(\d{2})-(\d{2})$/, "20$1-$2-$3");
-  return s;
-}
+const REVENUE_EXPR = revenueExpr("o");
+const UNITS_EXPR = unitsExpr("o");
+const PROFIT_EXPR = profitExpr("o");
+const ROW_COGS_EXPR = rowCogsExpr("o");
+const ACTIVE_COUNT_EXPR = activeCountExpr("o");
 
 export async function GET(req: NextRequest) {
   try {
@@ -39,13 +37,11 @@ export async function GET(req: NextRequest) {
     const state = searchParams.get("state");
     const tier = searchParams.get("tier");
     const brand = searchParams.get("brand");
+    const channel = searchParams.get("channel");
 
-    const conditions: string[] = [
-      "o.purchase_date IS NOT NULL",
-      "o.purchase_date <= NOW()",
-      "o.item_price > 0",
-      "(o.amazon_order_id IS NULL OR o.amazon_order_id NOT LIKE 'ORD-%')",
-    ];
+    const conditions: string[] = baseSalesConditions("o");
+    const channelCond = channelFilterCondition("o", channel);
+    if (channelCond) conditions.push(channelCond);
     const params: (string | number)[] = [];
     let paramIdx = 1;
 
@@ -131,7 +127,9 @@ export async function GET(req: NextRequest) {
 
     let query = `
       SELECT o.id, o.amazon_order_id, o.purchase_date, o.order_status,
-             o.fulfillment_channel, o.sales_channel, o.sku, o.asin,
+             o.fulfillment_channel, o.sales_channel,
+             ${channelDisplayExpr("o")} as channel_label,
+             o.sku, o.asin,
              o.quantity, o.currency, o.item_price, o.item_tax,
              ${ROW_COGS_EXPR} as cogs_price,
              ${PROFIT_EXPR} as profit,

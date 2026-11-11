@@ -36,8 +36,19 @@ const fmtK = (v: number) => v >= 100000 ? `₹${(v/100000).toFixed(1)}L` : v >= 
 /* ──────────────────────────────────────────────────────────
    Interfaces
    ────────────────────────────────────────────────────────── */
+const CHANNEL_LABELS: Record<string, string> = {
+  website: "Halte Website",
+  amazon: "Amazon",
+  b2b: "B2B",
+};
+
+const fmtCompact = (v: number) =>
+  v >= 10000000 ? `₹${(v / 10000000).toFixed(2)}Cr`
+    : v >= 100000 ? `₹${(v / 100000).toFixed(1)}L`
+    : fmtK(v);
+
 interface Filters {
-  sku: string; brand: string; year: string; month: string; startDate: string; endDate: string;
+  sku: string; brand: string; channel: string; year: string; month: string; startDate: string; endDate: string;
   city: string; state: string; tier: string;
 }
 
@@ -51,6 +62,7 @@ export default function SalesPage() {
       return {
         sku: p.get("sku") || "",
         brand: p.get("brand") || "",
+        channel: p.get("channel") || "",
         year: p.get("year") || "",
         month: p.get("month") || "",
         startDate: p.get("startDate") || "",
@@ -61,7 +73,7 @@ export default function SalesPage() {
       };
     }
     return {
-      sku: "", brand: "", year: "", month: "", startDate: "", endDate: "", city: "", state: "", tier: "",
+      sku: "", brand: "", channel: "", year: "", month: "", startDate: "", endDate: "", city: "", state: "", tier: "",
     };
   });
   const [summary, setSummary] = useState<any>(null);
@@ -97,6 +109,7 @@ export default function SalesPage() {
     const p = new URLSearchParams();
     if (filters.sku) p.set("sku", filters.sku);
     if (filters.brand) p.set("brand", filters.brand);
+    if (filters.channel) p.set("channel", filters.channel);
     if (filters.year) p.set("year", filters.year);
     if (filters.month) p.set("month", filters.month);
     if (filters.startDate) p.set("startDate", filters.startDate);
@@ -145,6 +158,17 @@ export default function SalesPage() {
   const totalProfit = useMemo(() => summary?.monthly?.reduce((a: number, m: any) => a + Number(m.total_profit || 0), 0) || 0, [summary]);
   const totalUnits = useMemo(() => summary?.monthly?.reduce((a: number, m: any) => a + Number(m.total_units || 0), 0) || 0, [summary]);
   const asp = totalOrders > 0 ? totalRevenue / totalOrders : 0;
+
+  const yearlyBreakdown = useMemo(() => {
+    const byYear: Record<string, number> = {};
+    for (const m of summary?.monthly || []) {
+      const y = String(m.month || "").slice(0, 4);
+      if (y) byYear[y] = (byYear[y] || 0) + Number(m.total_revenue || 0);
+    }
+    return ["2025", "2026", "2024"]
+      .filter(y => byYear[y] > 0)
+      .map(y => ({ year: y, label: fmtCompact(byYear[y]) }));
+  }, [summary]);
 
   const monthlyChart = useMemo(() => summary?.monthly?.map((m: any) => ({
     month: m.month, revenue: Number(m.total_revenue), orders: Number(m.total_orders), profit: Number(m.total_profit),
@@ -198,7 +222,7 @@ export default function SalesPage() {
     setPage(0);
   };
   const resetFilters = () => {
-    setFilters({ sku: "", brand: "", year: "", month: "", startDate: "", endDate: "", city: "", state: "", tier: "" });
+    setFilters({ sku: "", brand: "", channel: "", year: "", month: "", startDate: "", endDate: "", city: "", state: "", tier: "" });
     setPage(0);
   };
 
@@ -426,6 +450,12 @@ export default function SalesPage() {
             <option value="">All Brands</option>
             {(summary?.filters?.brands || []).map((b: string) => <option key={b} value={b}>{b}</option>)}
           </select>
+          <select className="filter-select" value={filters.channel} onChange={e => { setFilters(f => ({ ...f, channel: e.target.value })); setPage(0); }}>
+            <option value="">All Channels</option>
+            <option value="website">Halte Website</option>
+            <option value="amazon">Amazon</option>
+            <option value="b2b">B2B</option>
+          </select>
           <select className="filter-select" value={filters.year} onChange={e => { setFilters(f => ({ ...f, year: e.target.value, startDate: "", endDate: "", month: "" })); setPage(0); }}>
             <option value="">All Years</option>
             {(summary?.filters?.years || []).map((y: number) => <option key={y} value={String(y)}>{y}</option>)}
@@ -538,6 +568,7 @@ export default function SalesPage() {
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
             {selectedSkus.map(s => <span key={s} className="badge badge-accent" onClick={() => removeSku(s)} style={{ cursor: "pointer" }}>SKU: {s} ✕</span>)}
             {filters.brand && <span className="badge badge-accent" onClick={() => setFilter("brand", filters.brand)} style={{ cursor: "pointer" }}>Brand: {filters.brand} ✕</span>}
+            {filters.channel && <span className="badge badge-accent" onClick={() => setFilter("channel", filters.channel)} style={{ cursor: "pointer" }}>Channel: {CHANNEL_LABELS[filters.channel] || filters.channel} ✕</span>}
             {filters.year && <span className="badge badge-accent" onClick={() => setFilter("year", filters.year)} style={{ cursor: "pointer" }}>Year: {filters.year} ✕</span>}
             {filters.tier && <span className="badge badge-accent" onClick={() => setFilter("tier", filters.tier)} style={{ cursor: "pointer" }}>Tier: {filters.tier} ✕</span>}
             {filters.state && <span className="badge badge-accent" onClick={() => setFilter("state", filters.state)} style={{ cursor: "pointer" }}>State: {filters.state} ✕</span>}
@@ -571,7 +602,12 @@ export default function SalesPage() {
         </div>
         {isAllTime ? (
           <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
-            2025: <strong style={{ color: "var(--text-primary)" }}>₹3.76Cr</strong> · 2026: <strong style={{ color: "var(--text-primary)" }}>₹3.17Cr</strong> · 2024: <strong style={{ color: "var(--text-primary)" }}>₹2.46Cr</strong>
+            {yearlyBreakdown.length > 0 ? yearlyBreakdown.map((item, idx) => (
+              <span key={item.year}>
+                {idx > 0 && " · "}
+                {item.year}: <strong style={{ color: "var(--text-primary)" }}>{item.label}</strong>
+              </span>
+            )) : `${totalOrders.toLocaleString()} orders`}
           </div>
         ) : (
           <button
@@ -601,7 +637,11 @@ export default function SalesPage() {
             value: fmtCur(totalRevenue),
             color: "#6366f1",
             icon: "💰",
-            subtitle: isAllTime ? "All-time (2025: ₹3.76Cr · 2026: ₹3.17Cr)" : `Period total (${totalOrders.toLocaleString()} orders)`,
+            subtitle: isAllTime
+              ? (yearlyBreakdown.length > 0
+                  ? `All-time (${yearlyBreakdown.slice(0, 2).map(b => `${b.year}: ${b.label}`).join(" · ")})`
+                  : `All-time (${totalOrders.toLocaleString()} orders)`)
+              : `Period total (${totalOrders.toLocaleString()} orders)`,
           },
           {
             label: "Net Profit",
@@ -988,7 +1028,7 @@ export default function SalesPage() {
                     </td>
                     <td style={{ cursor: "pointer" }} onClick={() => o.ship_city && toggleCity(o.ship_city)}>{o.ship_city || "—"}</td>
                     <td style={{ cursor: "pointer" }} onClick={() => o.ship_state && setFilter("state", o.ship_state)}>{o.ship_state || "—"}</td>
-                    <td style={{ fontSize: 10 }}>{o.fulfillment_channel || "—"}</td>
+                    <td style={{ fontSize: 10 }}>{o.channel_label || o.fulfillment_channel || "—"}</td>
                   </tr>
                 ))}
               </tbody>
